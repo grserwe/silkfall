@@ -51,6 +51,14 @@
     text-transform: uppercase;
   }
   .brand em { font-style: normal; color: var(--glacier); }
+  .brand .ver {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--slate);
+    letter-spacing: 0.08em;
+    margin-left: 6px;
+    text-transform: none;
+  }
   .status {
     font-size: 12px;
     color: var(--slate);
@@ -290,7 +298,7 @@
 <body>
 <div class="app" id="app" data-state="start">
   <div class="topbar">
-    <div class="brand">Silk<em>fall</em></div>
+    <div class="brand">Silk<em>fall</em><span class="ver">v1.2</span></div>
     <div class="status" id="status">ready</div>
   </div>
 
