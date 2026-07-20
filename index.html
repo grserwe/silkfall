@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0a0c0d">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
 <title>Silkfall — Long Exposure Camera</title>
 <style>
   /* ————— Tokens ————— */
@@ -289,6 +292,54 @@
     min-height: 1.5em;
   }
 
+  .zoom {
+    width: 150px;
+    accent-color: var(--glacier);
+    align-self: center;
+    margin: 0;
+  }
+  [hidden] { display: none !important; }
+  .ctlrow:not(:has(> :not([hidden]))) { display: none; }
+
+  /* ————— Landscape: dock moves to the right so the frame stays wide ————— */
+  @media (orientation: landscape) and (max-height: 600px) {
+    .app { flex-direction: row; }
+    .topbar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 180px;
+      padding: calc(8px + env(safe-area-inset-top)) 20px 8px calc(18px + env(safe-area-inset-left));
+      pointer-events: none;
+    }
+    .stage { margin: 10px 0 10px calc(10px + env(safe-area-inset-left)); }
+    .dock {
+      width: 180px;
+      box-sizing: border-box;
+      flex-shrink: 0;
+      overflow-y: auto;
+      justify-content: center;
+      gap: 12px;
+      padding: 12px calc(12px + env(safe-area-inset-right)) 12px 12px;
+    }
+    .ctlrow { flex-direction: column; align-items: center; gap: 8px; }
+    .durations {
+      flex-wrap: wrap;
+      justify-content: center;
+      border-radius: 18px;
+      max-width: 150px;
+    }
+    .durations button { padding: 7px 12px; }
+    .shutter-row {
+      grid-template-columns: none;
+      grid-auto-rows: auto;
+      justify-items: center;
+      gap: 10px;
+      width: auto;
+    }
+    .hint { display: none; }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; }
   }
@@ -298,7 +349,7 @@
 <body>
 <div class="app" id="app" data-state="start">
   <div class="topbar">
-    <div class="brand">Silk<em>fall</em><span class="ver">v1.2</span></div>
+    <div class="brand">Silk<em>fall</em><span class="ver">v1.3</span></div>
     <div class="status" id="status">ready</div>
   </div>
 
@@ -327,6 +378,11 @@
       <button class="toggle" id="stabBtn" aria-pressed="true">Stabilize</button>
     </div>
 
+    <div class="ctlrow">
+      <div class="durations" id="lenses" role="group" aria-label="Lens" hidden></div>
+      <input type="range" class="zoom" id="zoomCtl" aria-label="Zoom" hidden>
+    </div>
+
     <div class="shutter-row">
       <div class="side"><button class="btn" id="retakeBtn" hidden>Retake</button></div>
       <div class="shutter-wrap" id="shutterWrap">
@@ -352,6 +408,7 @@
   const saveBtn = $("saveBtn"), retakeBtn = $("retakeBtn");
   const statusEl = $("status"), hint = $("hint"), hud = $("hud"), hudText = $("hudText");
   const durations = $("durations"), stabBtn = $("stabBtn");
+  const lenses = $("lenses"), zoomCtl = $("zoomCtl");
 
   const MAX_EDGE = 2560;          // processing cap keeps stacking fast on-device
   const ALIGN_EDGE = 192;         // resolution used for motion estimation
@@ -361,6 +418,8 @@
   let capturing = false;
   let lastBlob = null;
   let wakeLock = null;
+  let currentDeviceId = null;
+  let resuming = false;
 
   durations.addEventListener("click", (e) => {
     const b = e.target.closest("button[data-s]");
@@ -436,6 +495,118 @@
     };
   }
 
+  /* ————— Camera lifecycle ————— */
+
+  function updateStatus() {
+    if (capturing || app.dataset.state === "result") return;
+    const s = track && track.getSettings ? track.getSettings() : {};
+    statusEl.textContent = (s.width && s.height) ? s.width + "×" + s.height : "live";
+  }
+
+  async function openCamera(deviceId) {
+    if (stream) { for (const t of stream.getTracks()) t.stop(); }
+    const v = deviceId
+      ? { deviceId: { exact: deviceId } }
+      : { facingMode: { ideal: "environment" } };
+    v.width = { ideal: 4096 };
+    v.height = { ideal: 2304 };
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: v });
+    track = stream.getVideoTracks()[0];
+    const s = track.getSettings ? track.getSettings() : {};
+    currentDeviceId = s.deviceId || deviceId || null;
+    track.addEventListener("ended", () => { if (!document.hidden) resumeCamera(); });
+    video.srcObject = stream;
+    await video.play();
+    setupZoom();
+    markActiveLens();
+    updateStatus();
+  }
+
+  // Android kills or mutes the camera track when the screen turns off; without
+  // this, coming back shows a frozen frame until a manual page refresh.
+  async function resumeCamera() {
+    if (!stream || capturing || resuming) return;
+    resuming = true;
+    try {
+      try { await video.play(); } catch (_) {}
+      let t = stream.getVideoTracks()[0];
+      if (t && t.readyState === "live" && !t.muted) return;
+      await new Promise((r) => setTimeout(r, 500));
+      t = stream.getVideoTracks()[0];
+      if (t && t.readyState === "live" && !t.muted) return;
+      statusEl.textContent = "reopening…";
+      try { await openCamera(currentDeviceId); }
+      catch (_) {
+        try { await openCamera(null); }
+        catch (_) { statusEl.textContent = "camera lost — reload"; }
+      }
+    } finally { resuming = false; }
+  }
+
+  /* ————— Lenses & zoom ————— */
+
+  function setupZoom() {
+    const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.zoom && typeof caps.zoom.min === "number" && caps.zoom.max > caps.zoom.min) {
+      zoomCtl.min = caps.zoom.min;
+      zoomCtl.max = caps.zoom.max;
+      zoomCtl.step = caps.zoom.step || 0.1;
+      const s = track.getSettings();
+      zoomCtl.value = (typeof s.zoom === "number") ? s.zoom : caps.zoom.min;
+      zoomCtl.hidden = false;
+    } else {
+      zoomCtl.hidden = true;
+    }
+  }
+
+  zoomCtl.addEventListener("input", () => {
+    if (!track) return;
+    track.applyConstraints({ advanced: [{ zoom: Number(zoomCtl.value) }] }).catch(() => {});
+  });
+
+  function lensLabel(label, i) {
+    const l = (label || "").toLowerCase();
+    const m = l.match(/(\d+(?:\.\d+)?)\s*x/);
+    if (m) return m[1] + "×";
+    if (l.includes("ultra")) return "0.5×";
+    if (l.includes("tele")) return "Tele";
+    if (l.includes("macro")) return "Macro";
+    if (l.includes("wide") || l.includes("main")) return "1×";
+    return "Lens " + (i + 1);
+  }
+
+  async function buildLensUI() {
+    let devs = [];
+    try { devs = await navigator.mediaDevices.enumerateDevices(); } catch (_) { return; }
+    const back = devs.filter((d) =>
+      d.kind === "videoinput" && !/front|user|selfie/i.test(d.label || ""));
+    if (back.length < 2) return;
+    lenses.innerHTML = "";
+    back.forEach((d, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = lensLabel(d.label, i);
+      b.dataset.id = d.deviceId;
+      lenses.appendChild(b);
+    });
+    lenses.hidden = false;
+    markActiveLens();
+  }
+
+  function markActiveLens() {
+    for (const b of lenses.querySelectorAll("button")) {
+      b.setAttribute("aria-pressed", String(b.dataset.id === currentDeviceId));
+    }
+  }
+
+  lenses.addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-id]");
+    if (!b || capturing || b.dataset.id === currentDeviceId) return;
+    statusEl.textContent = "switching…";
+    try { await openCamera(b.dataset.id); }
+    catch (_) { try { await openCamera(null); } catch (_) {} }
+  });
+
   startBtn.addEventListener("click", async () => {
     startBtn.disabled = true;
     veilNote.hidden = true;
@@ -455,22 +626,12 @@
     } catch (_) {}
 
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 4096 },
-          height: { ideal: 2304 },
-        },
-      });
-      track = stream.getVideoTracks()[0];
-      video.srcObject = stream;
-      await video.play();
+      await openCamera(null);
       veil.style.display = "none";
       shutter.disabled = false;
-      const s = track.getSettings();
-      statusEl.textContent = (s.width && s.height) ? s.width + "×" + s.height : "live";
+      app.dataset.state = "live";
       hint.textContent = "Frame the falls, pick a length, hold as steady as you can.";
+      buildLensUI();
     } catch (err) {
       startBtn.disabled = false;
       veilNote.hidden = false;
@@ -587,6 +748,7 @@
     rctx.putImageData(out, -cropX, -cropY);
 
     lastBlob = await new Promise((res) => resultCanvas.toBlob(res, "image/jpeg", 0.95));
+    downloadBlob(lastBlob);
 
     hud.style.display = "none";
     video.style.display = "none";
@@ -598,7 +760,7 @@
     retakeBtn.hidden = false;
     statusEl.textContent = frames + " frames · " + durationSec + "s"
       + (stabilize ? " · stabilized" : "");
-    hint.textContent = "Silky? Save it. Choppy water usually means it needs a longer exposure.";
+    hint.textContent = "Auto-saved to Downloads. Use Save to share to Photos. Choppy water needs a longer exposure.";
     capturing = false;
 
     if (wakeLock) { try { await wakeLock.release(); } catch (_) {} wakeLock = null; }
@@ -615,22 +777,41 @@
     hint.textContent = "Frame the falls, pick a length, hold as steady as you can.";
   });
 
+  function tsName() {
+    const d = new Date(), p = (n) => String(n).padStart(2, "0");
+    return "silkfall-" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate())
+      + "-" + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + ".jpg";
+  }
+
+  function downloadBlob(blob) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = tsName();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
   saveBtn.addEventListener("click", async () => {
     if (!lastBlob) return;
-    const file = new File([lastBlob], "silkfall-" + Date.now() + ".jpg", { type: "image/jpeg" });
+    const file = new File([lastBlob], tsName(), { type: "image/jpeg" });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try { await navigator.share({ files: [file] }); return; } catch (_) { /* user cancelled → fall through */ }
     }
-    const url = URL.createObjectURL(lastBlob);
-    const a = document.createElement("a");
-    a.href = url; a.download = file.name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    downloadBlob(lastBlob);
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden && wakeLock) { wakeLock = null; }
+    if (document.hidden) { wakeLock = null; return; }
+    resumeCamera();
   });
+  window.addEventListener("pageshow", (e) => { if (e.persisted) resumeCamera(); });
+
+  if ("serviceWorker" in navigator && location.protocol !== "file:") {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
 })();
 </script>
 </body>

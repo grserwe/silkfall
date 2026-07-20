@@ -1,0 +1,16 @@
+{
+  "name": "Silkfall — Long Exposure Camera",
+  "short_name": "Silkfall",
+  "description": "Stacks a burst of frames into one long exposure — waterfalls go silky while rocks stay sharp.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0c0d",
+  "theme_color": "#0a0c0d",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
